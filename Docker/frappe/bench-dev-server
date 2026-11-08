@@ -1,0 +1,17 @@
+#!/bin/bash
+
+cleanup() {
+    echo "Received signal SIGTERM, stopping..."
+    if [ -n "$running_script_pid" ]; then
+        kill -s SIGKILL "$running_script_pid"
+    fi
+    exit 0
+}
+
+trap cleanup SIGTERM
+
+fuser -k 80/tcp
+/usr/local/bin/bench serve --port 80 &
+
+running_script_pid=$!
+wait $running_script_pid

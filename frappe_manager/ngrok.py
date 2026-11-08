@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+
+import asyncio
+import signal
+import sys
+import time
+
+import ngrok
+
+from frappe_manager.output_manager import get_global_output_handler, set_global_output_handler, spinner
+from frappe_manager.output_manager.rich_output import RichOutputHandler
+
+
+def create_tunnel(site_name: str, auth_token: str, port: int = 80) -> None:
+    """
+    Create an ngrok HTTP tunnel for the specified site name and keep it running.
+
+    Args:
+        site_name: The site name to use for host header
+        auth_token: Ngrok authentication token
+        port: The local port to tunnel to (default: 80)
+    """
+    try:
+        output = get_global_output_handler()
+    except RuntimeError:
+        output = RichOutputHandler()
+        set_global_output_handler(output)
+
+    with spinner(output, f"Forwarding all requests from {site_name}"):
+        try:
+            ngrok.set_auth_token(auth_token)
+
+            listener = ngrok.forward(
+                port=port,
+                authtoken=auth_token,
+                request_header_add=[f"Host: {site_name}"],
+                opts={"addr": str(port), "host_header": site_name},
+            )
+
+            tunnel_url = listener.url()
+        except Exception as e:
+            print(f"Error creating tunnel: {e}")
+            return
+
+    print(f"Ingress established at: {tunnel_url}")
+
+    def signal_handler(sig, frame):
+        print("\nShutting down ngrok tunnel...")
+        listener.close()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        listener.close()
+        sys.exit(0)
+    except Exception as e:
+        print(f"Error in tunnel: {e}")
+        listener.close()
+        sys.exit(1)
+
+
+async def start_tunnel(site_name: str, auth_token: str):
+    """
+    Start an ngrok tunnel and keep it running until interrupted.
+
+    Args:
+        site_name: The site name to use for host header
+        auth_token: Ngrok authentication token
+    """
+    listener = await ngrok.connect(
+        80,
+        authtoken=auth_token,
+        request_header_add=[f"Host: {site_name}"],
+        opts={"addr": "80", "host_header": site_name},
+    )
+
+    print(f"Ingress established at: {listener.url()}")
+
+    # Handle graceful shutdown
+    def signal_handler(sig, frame):
+        print("\nShutting down ngrok tunnel...")
+        asyncio.create_task(listener.close())
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+
+    # Keep the tunnel open
+    try:
+        while True:
+            await asyncio.sleep(1)
+    except Exception as e:
+        print(f"Error: {e}")
+        await listener.close()
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 3:
+        print("Usage: ngrok.py <site_name> <auth_token>")
+        sys.exit(1)
+    asyncio.run(start_tunnel(sys.argv[1], sys.argv[2]))

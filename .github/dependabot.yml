@@ -1,0 +1,27 @@
+version: 2
+updates:
+  - package-ecosystem: "docker"
+    directory: "/Docker/frappe"
+    schedule:
+      interval: "monthly"
+    # The bench image hardcodes a jammy-built wkhtmltopdf package and no CI job
+    # builds this Dockerfile on a pull request, so base-image bumps arrive
+    # unverifiable. Upgrade the base deliberately, not by merging a bot PR.
+    ignore:
+      - dependency-name: "ubuntu"
+  - package-ecosystem: "docker"
+    directory: "/Docker/nginx"
+    schedule:
+      interval: "monthly"
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "daily"
+  - package-ecosystem: "uv"
+    directory: "/Docker/frappe/fmx"
+    schedule:
+      interval: "daily"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "daily"

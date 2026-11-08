@@ -1,0 +1,109 @@
+name: Prepare Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g. 0.19.0)'
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: develop
+          fetch-depth: 0
+
+      - name: Validate version format
+        env:
+          VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Error: '$VERSION' is not a valid semver (expected e.g. 0.19.0)"
+            exit 1
+          fi
+
+      # Release commits land only on main, so develop lacks main's changelog sections.
+      # Taking main's file alone still conflicts in the release PR: both sides then
+      # changed the same spot since the merge base. Merging main makes main an ancestor.
+      - name: Merge main into the release
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          if ! git merge --no-edit origin/main; then
+            conflicts=$(git diff --name-only --diff-filter=U)
+            # The version file always conflicts (main has the last release, develop the next .dev0);
+            # "Set release version" overwrites it, so keep develop's copy. Anything else is a real conflict.
+            if [ "$conflicts" != "frappe_manager/__about__.py" ]; then
+              echo "::error::unexpected conflicts merging main: $conflicts"
+              exit 1
+            fi
+            git checkout --ours frappe_manager/__about__.py
+            git add frappe_manager/__about__.py
+            git commit --no-edit
+          fi
+          echo "Sections currently in the changelog:"
+          grep -c '^## v' docs/changelog.md
+
+      - name: Update changelog
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --unreleased --tag v${{ github.event.inputs.version }} --prepend docs/changelog.md
+        env:
+          GITHUB_REPO: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # hatchling reads the package version from this file, and bake-images.yml
+      # derives the published image tag from it, so a release branch left at
+      # develop's dev version would publish images under the dev tag.
+      - name: Set release version
+        env:
+          VERSION: ${{ github.event.inputs.version }}
+        run: |
+          sed -i "s/^__version__ = \".*\"/__version__ = \"${VERSION}\"/" frappe_manager/__about__.py
+
+          DECLARED=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' frappe_manager/__about__.py)
+          if [ "$DECLARED" != "$VERSION" ]; then
+            echo "::error::failed to set version in frappe_manager/__about__.py (got '$DECLARED')"
+            exit 1
+          fi
+          echo "frappe_manager/__about__.py -> $DECLARED"
+
+      - name: Verify changelog contains the new section
+        env:
+          VERSION: ${{ github.event.inputs.version }}
+        run: python3 scripts/release_notes.py "$VERSION" >/dev/null
+
+      - name: Open release PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ github.event.inputs.version }}
+        run: |
+          BRANCH="release/v${VERSION}"
+          git checkout -b "$BRANCH"
+          git add docs/changelog.md frappe_manager/__about__.py
+          git commit -m "chore(release): prepare for v${VERSION}"
+          git push origin "$BRANCH"
+          gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "chore(release): v${VERSION}" \
+            --body "## Release v${VERSION}
+
+          Review the generated changelog entries below before merging.
+          Merging this PR creates the \`v${VERSION}\` tag, which triggers the draft
+          release and the image build.
+
+          \`docs/changelog.md\` is based on main's copy and \`frappe_manager/__about__.py\`
+          has been set to \`${VERSION}\` automatically.
+
+          - [ ] Changelog entries look correct and complete
+          - [ ] No entries from previous releases have been duplicated"
